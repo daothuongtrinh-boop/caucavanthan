@@ -7,6 +7,11 @@ import UIOverlay from './components/UIOverlay';
 import TensionBar from './components/TensionBar';
 import Shop from './components/Shop';
 import Collection from './components/Collection';
+import Quests from './components/Quests';
+import Leaderboard from './components/Leaderboard';
+import Skins from './components/Skins';
+
+const STORAGE_KEY = 'fishing_game_v7_final';
 
 const INITIAL_STATS: PlayerStats = {
   money: 500,
@@ -16,7 +21,7 @@ const INITIAL_STATS: PlayerStats = {
   upgrades: { rod: 1, line: 1, boat: 1 },
   skills: { 'focus': { unlocked: true, lastUsed: 0, level: 1 } },
   activeBait: 'worm',
-  baitsInventory: { 'worm': 99999 }, // Giun đất là vô hạn
+  baitsInventory: { 'worm': 99999 },
   activeCharacter: 'rookie',
   ownedCharacters: ['rookie'],
   activeRodGear: 'wood',
@@ -34,8 +39,25 @@ const INITIAL_STATS: PlayerStats = {
 
 const App: React.FC = () => {
   const [stats, setStats] = useState<PlayerStats>(() => {
-    const saved = localStorage.getItem('fishing_game_v6');
-    return saved ? JSON.parse(saved) : INITIAL_STATS;
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        // Hợp nhất dữ liệu cũ với INITIAL_STATS để đảm bảo các trường mới (quests, skins, ...) luôn tồn tại
+        return {
+          ...INITIAL_STATS,
+          ...parsed,
+          quests: parsed.quests || INITIAL_STATS.quests,
+          localLeaderboard: parsed.localLeaderboard || INITIAL_STATS.localLeaderboard,
+          ownedSkins: parsed.ownedSkins || INITIAL_STATS.ownedSkins,
+          baitsInventory: parsed.baitsInventory || INITIAL_STATS.baitsInventory,
+          skills: parsed.skills || INITIAL_STATS.skills,
+        };
+      } catch (e) {
+        return INITIAL_STATS;
+      }
+    }
+    return INITIAL_STATS;
   });
 
   const [status, setStatus] = useState<GameStatus>(GameStatus.IDLE);
@@ -62,7 +84,7 @@ const App: React.FC = () => {
   const fishTimerRef = useRef(0);
 
   useEffect(() => {
-    localStorage.setItem('fishing_game_v6', JSON.stringify(stats));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(stats));
   }, [stats]);
 
   useEffect(() => {
@@ -160,14 +182,9 @@ const App: React.FC = () => {
 
   const handleCast = () => {
     if (statusRef.current !== GameStatus.IDLE) return;
-    
-    // Kiểm tra và tiêu thụ mồi
     let currentBaitId = stats.activeBait;
     let stock = stats.baitsInventory[currentBaitId] || 0;
-    
-    if (currentBaitId !== 'worm' && stock <= 0) {
-      currentBaitId = 'worm'; // Tự động về giun đất nếu hết mồi đặc biệt
-    }
+    if (currentBaitId !== 'worm' && stock <= 0) currentBaitId = 'worm';
 
     setStats(prev => ({
       ...prev,
@@ -191,22 +208,12 @@ const App: React.FC = () => {
     const availableFish = FISH_DATA.filter(f => currentMap.fishTypes.includes(f.id));
     const eventBonus = isGiantEvent ? 0.2 : 0;
     const luckBonus = (character.bonusLuck / 100) + (bait.rarityBonus / 8);
-    
-    const weightedPool = availableFish.map(f => ({
-      ...f,
-      adjChance: f.rarity !== Rarity.COMMON ? f.chance * (1 + luckBonus + eventBonus) : f.chance
-    }));
+    const weightedPool = availableFish.map(f => ({ ...f, adjChance: f.rarity !== Rarity.COMMON ? f.chance * (1 + luckBonus + eventBonus) : f.chance }));
     const totalChance = weightedPool.reduce((acc, curr) => acc + curr.adjChance, 0);
     let random = Math.random() * totalChance;
     let selectedFish = weightedPool[0];
-    for (const f of weightedPool) {
-      if (random < f.adjChance) { selectedFish = f; break; }
-      random -= f.adjChance;
-    }
-
-    const weight = (selectedFish.minWeight + Math.random() * (selectedFish.maxWeight - selectedFish.minWeight)) 
-      * (isGiantEvent ? 3 : 1) * bait.weightBonus;
-
+    for (const f of weightedPool) { if (random < f.adjChance) { selectedFish = f; break; } random -= f.adjChance; }
+    const weight = (selectedFish.minWeight + Math.random() * (selectedFish.maxWeight - selectedFish.minWeight)) * (isGiantEvent ? 3 : 1) * bait.weightBonus;
     setActiveFish({ type: selectedFish, weight: Math.floor(weight) });
     setStatus(GameStatus.HOOKED);
   };
@@ -218,7 +225,6 @@ const App: React.FC = () => {
     const character = CHARACTERS.find(c => c.id === stats.activeCharacter) || CHARACTERS[0];
     const baseValue = Math.floor(activeFish.weight * activeFish.type.baseValue);
     const value = Math.floor(baseValue * (1 + character.bonusIncome / 100));
-    
     setStats(prev => {
       const updatedQuests = prev.quests.map(q => {
         if (q.completed) return q;
@@ -249,37 +255,29 @@ const App: React.FC = () => {
     const sd = stats.skills[skillId];
     if (!skill || !sd) return;
     const cost = skill.upgradeCost * sd.level;
-    if (stats.money >= cost) {
-      setStats(prev => ({ ...prev, money: prev.money - cost, skills: { ...prev.skills, [skillId]: { ...sd, level: sd.level + 1 } } }));
-    }
+    if (stats.money >= cost) setStats(prev => ({ ...prev, money: prev.money - cost, skills: { ...prev.skills, [skillId]: { ...sd, level: sd.level + 1 } } }));
   };
 
   const buyItem = (type: string, item: any, amount: number = 1) => {
     const totalCost = item.price * amount;
     if (stats.money < totalCost) return;
-    
     setStats(prev => {
       const next = { ...prev, money: prev.money - totalCost };
-      if (type === 'bait') {
-        next.baitsInventory = {
-          ...prev.baitsInventory,
-          [item.id]: (prev.baitsInventory[item.id] || 0) + amount
-        };
-      } else if (type === 'character') {
-        next.ownedCharacters = [...prev.ownedCharacters, item.id];
-        next.activeCharacter = item.id;
-      } else if (type === 'rodGear') {
-        next.ownedRodGear = [...prev.ownedRodGear, item.id];
-        next.activeRodGear = item.id;
-      } else if (type === 'skill') {
-        next.skills = { ...prev.skills, [item.id]: { unlocked: true, lastUsed: 0, level: 1 } };
-      }
+      if (type === 'bait') next.baitsInventory = { ...prev.baitsInventory, [item.id]: (prev.baitsInventory[item.id] || 0) + amount };
+      else if (type === 'character') { next.ownedCharacters = [...prev.ownedCharacters, item.id]; next.activeCharacter = item.id; }
+      else if (type === 'rodGear') { next.ownedRodGear = [...prev.ownedRodGear, item.id]; next.activeRodGear = item.id; }
+      else if (type === 'skill') next.skills = { ...prev.skills, [item.id]: { unlocked: true, lastUsed: 0, level: 1 } };
       return next;
     });
   };
 
+  const buySkin = (skin: RodSkin) => {
+    if (stats.money < skin.price) return;
+    setStats(prev => ({ ...prev, money: prev.money - skin.price, ownedSkins: [...prev.ownedSkins, skin.id], activeSkin: skin.id }));
+  };
+
   const selectItem = (type: string, id: string) => {
-    setStats(prev => ({ ...prev, [type === 'bait' ? 'activeBait' : type === 'character' ? 'activeCharacter' : 'activeRodGear']: id }));
+    setStats(prev => ({ ...prev, [type === 'bait' ? 'activeBait' : type === 'character' ? 'activeCharacter' : type === 'rodGear' ? 'activeRodGear' : 'activeSkin']: id }));
   };
 
   const currentRodSkin = ROD_SKINS.find(s => s.id === stats.activeSkin) || ROD_SKINS[0];
@@ -321,10 +319,24 @@ const App: React.FC = () => {
         </>
       )}
 
-      <UIOverlay stats={stats} status={status} currentMap={currentMap} onCast={handleCast} onOpenShop={() => setActiveModal('shop')} onOpenCollection={() => setActiveModal('collection')} onOpenQuests={() => setActiveModal('quests')} onOpenLeaderboard={() => setActiveModal('leaderboard')} onOpenSkins={() => setActiveModal('skins')} onSelectMap={(m) => setCurrentMap(m)} />
+      <UIOverlay 
+        stats={stats} 
+        status={status} 
+        currentMap={currentMap} 
+        onCast={handleCast} 
+        onOpenShop={() => setActiveModal('shop')} 
+        onOpenCollection={() => setActiveModal('collection')} 
+        onOpenQuests={() => setActiveModal('quests')} 
+        onOpenLeaderboard={() => setActiveModal('leaderboard')} 
+        onOpenSkins={() => setActiveModal('skins')} 
+        onSelectMap={(m) => { if (stats.totalWeight >= m.unlockedAt) setCurrentMap(m); }} 
+      />
 
       {activeModal === 'shop' && <Shop stats={stats} onClose={() => setActiveModal(null)} onUpgrade={upgradeSkillLevel} onBuyItem={buyItem} onSelectItem={selectItem} />}
       {activeModal === 'collection' && <Collection stats={stats} onClose={() => setActiveModal(null)} />}
+      {activeModal === 'quests' && <Quests stats={stats} onClose={() => setActiveModal(null)} />}
+      {activeModal === 'leaderboard' && <Leaderboard stats={stats} onClose={() => setActiveModal(null)} />}
+      {activeModal === 'skins' && <Skins stats={stats} onClose={() => setActiveModal(null)} onBuySkin={buySkin} onSelectSkin={(id) => selectItem('skin', id)} />}
       
       {status === GameStatus.HOOKED && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/40 z-40">
